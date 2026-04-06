@@ -1,0 +1,333 @@
+blueprint:
+  name: IKEA RODRET Dimmer – Light Control
+  description: |
+    Steuert eine oder mehrere Lampen mit dem IKEA E2201 RODRET Dimmer über Zigbee2MQTT.
+    Kombiniert Controller und Light-Hook in einer einzigen Automation.
+
+    **Tastenbelegung (Variante 1 – Standard):**
+    - Oben kurz: Einschalten
+    - Oben lang: Heller
+    - Unten kurz: Ausschalten
+    - Unten lang: Dunkler
+
+    **Tastenbelegung (Variante 2):**
+    - Oben kurz: Heller
+    - Oben doppelt: Einschalten
+    - Unten kurz: Dunkler
+    - Unten doppelt: Ausschalten
+  domain: automation
+  input:
+    remote_topic:
+      name: Zigbee2MQTT Topic des RODRET
+      description: "Topic des Geräts in Zigbee2MQTT, z.B. zigbee2mqtt/Mein RODRET"
+      selector:
+        text:
+    lights:
+      name: Lampe(n)
+      description: Eine oder mehrere Lampen, die gesteuert werden sollen.
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    button_variant:
+      name: Tastenvariante
+      description: |
+        Variante 1: Kurz = an/aus, Lang = dimmen.
+        Variante 2: Kurz = dimmen, Doppelt = an/aus.
+      default: "1"
+      selector:
+        select:
+          options:
+            - label: "Variante 1 – Kurz an/aus, Lang dimmen"
+              value: "1"
+            - label: "Variante 2 – Kurz dimmen, Doppelt an/aus"
+              value: "2"
+    light_transition:
+      name: Übergangszeit (ms)
+      description: Zeit in Millisekunden für Ein-/Ausblenden.
+      default: 250
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 50
+          unit_of_measurement: ms
+          mode: slider
+    min_brightness:
+      name: Minimale Helligkeit
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          unit_of_measurement: brightness
+          mode: slider
+    max_brightness:
+      name: Maximale Helligkeit
+      default: 255
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          unit_of_measurement: brightness
+          mode: slider
+    brightness_steps_long:
+      name: Dimm-Schritte (Lang-Druck)
+      description: Anzahl Schritte von Min bis Max beim Halten der Taste.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          step: 1
+          mode: box
+    force_brightness:
+      name: Helligkeit beim Einschalten erzwingen
+      default: false
+      selector:
+        boolean:
+    on_brightness:
+      name: Helligkeit beim Einschalten
+      description: Nur relevant wenn "Helligkeit erzwingen" aktiv ist.
+      default: 255
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          unit_of_measurement: brightness
+          mode: slider
+    smooth_power_on:
+      name: Sanftes Einschalten
+      description: Beim Dimmen aufwärts aus dem Aus-Zustand auf Mindesthelligkeit starten.
+      default: true
+      selector:
+        boolean:
+    smooth_power_off:
+      name: Sanftes Ausschalten
+      description: Beim Dimmen abwärts auf Mindesthelligkeit automatisch ausschalten.
+      default: true
+      selector:
+        boolean:
+
+variables:
+  lights: !input lights
+  button_variant: !input button_variant
+  light_transition: !input light_transition
+  min_brightness: !input min_brightness
+  max_brightness: !input max_brightness
+  brightness_steps_long: !input brightness_steps_long
+  force_brightness: !input force_brightness
+  on_brightness: !input on_brightness
+  smooth_power_on: !input smooth_power_on
+  smooth_power_off: !input smooth_power_off
+  step_long: "{{ (max_brightness - min_brightness) / brightness_steps_long }}"
+  # Aktionen je nach Variante
+  action_turn_on: "{{ 'button_up_short' if button_variant == '1' else 'button_up_double' }}"
+  action_turn_off: "{{ 'button_down_short' if button_variant == '1' else 'button_down_double' }}"
+  action_brightness_up_repeat: "button_up_long"
+  action_brightness_down_repeat: "button_down_long"
+  action_brightness_up: "{{ 'button_up_double' if button_variant == '1' else 'button_up_short' }}"
+  action_brightness_down: "{{ 'button_down_double' if button_variant == '1' else 'button_down_short' }}"
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - trigger: mqtt
+    topic: !input remote_topic
+    value_template: "{{ value_json.action }}"
+    id: mqtt_action
+
+condition:
+  - condition: template
+    value_template: "{{ trigger.payload_json.action is defined and trigger.payload_json.action != '' }}"
+
+action:
+  - variables:
+      action: "{{ trigger.payload_json.action }}"
+  - choose:
+      # Einschalten
+      - conditions: "{{ action == action_turn_on }}"
+        sequence:
+          - choose:
+              - conditions: "{{ force_brightness }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      brightness: !input on_brightness
+                      transition: "{{ light_transition / 1000 }}"
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  transition: "{{ light_transition / 1000 }}"
+
+      # Ausschalten
+      - conditions: "{{ action == action_turn_off }}"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: !input lights
+            data:
+              transition: "{{ light_transition / 1000 }}"
+
+      # Helligkeit + (Einzel-Schritt, Variante 2)
+      - conditions: "{{ action == action_brightness_up and button_variant == '2' }}"
+        sequence:
+          - choose:
+              - conditions: >
+                  {{ expand(lights) | selectattr('state','eq','off') | list | count == expand(lights) | list | count
+                  and not smooth_power_on }}
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: "{{ light_transition / 1000 }}"
+              - conditions: >
+                  {{ expand(lights) | selectattr('state','eq','off') | list | count == expand(lights) | list | count
+                  and smooth_power_on }}
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      brightness: "{{ min_brightness }}"
+                      transition: "{{ light_transition / 1000 }}"
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  brightness: >
+                    {{ [[expand(lights) | selectattr('state','eq','on')
+                    | map(attribute='attributes.brightness') | list | average | int(0)
+                    + step_long, min_brightness] | max, max_brightness] | min }}
+                  transition: 0.25
+
+      # Helligkeit - (Einzel-Schritt, Variante 2)
+      - conditions: "{{ action == action_brightness_down and button_variant == '2' }}"
+        sequence:
+          - choose:
+              - conditions: >
+                  {{ smooth_power_off and
+                  expand(lights) | selectattr('state','eq','on')
+                  | map(attribute='attributes.brightness') | list | average | int(0) <= min_brightness }}
+                sequence:
+                  - action: light.turn_off
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: "{{ light_transition / 1000 }}"
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  brightness: >
+                    {{ [[expand(lights) | selectattr('state','eq','on')
+                    | map(attribute='attributes.brightness') | list | average | int(0)
+                    - step_long, min_brightness] | max, max_brightness] | min }}
+                  transition: 0.25
+
+      # Helligkeit + (Halten)
+      - conditions: "{{ action == action_brightness_up_repeat }}"
+        sequence:
+          - choose:
+              - conditions: >
+                  {{ expand(lights) | selectattr('state','eq','off') | list | count == expand(lights) | list | count
+                  and not smooth_power_on }}
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      transition: "{{ light_transition / 1000 }}"
+                  - delay:
+                      milliseconds: !input light_transition
+              - conditions: >
+                  {{ expand(lights) | selectattr('state','eq','off') | list | count == expand(lights) | list | count
+                  and smooth_power_on }}
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      brightness: "{{ min_brightness }}"
+                      transition: "{{ light_transition / 1000 }}"
+                  - delay:
+                      milliseconds: !input light_transition
+          - repeat:
+              while: >
+                {{ expand(lights) | selectattr('state','eq','on')
+                | map(attribute='attributes.brightness') | list | average | int(0) < max_brightness }}
+              sequence:
+                - action: light.turn_on
+                  target:
+                    entity_id: !input lights
+                  data:
+                    brightness: >
+                      {{ [[expand(lights) | selectattr('state','eq','on')
+                      | map(attribute='attributes.brightness') | list | average | int(0)
+                      + step_long, min_brightness] | max, max_brightness] | min }}
+                    transition: 0.25
+                - delay:
+                    milliseconds: 250
+
+      # Helligkeit - (Halten)
+      - conditions: "{{ action == action_brightness_down_repeat }}"
+        sequence:
+          - choose:
+              - conditions: "{{ smooth_power_off }}"
+                sequence:
+                  - repeat:
+                      while: >
+                        {{ expand(lights) | selectattr('state','eq','on') | list | count > 0 }}
+                      sequence:
+                        - choose:
+                            - conditions: >
+                                {{ expand(lights) | selectattr('state','eq','on')
+                                | map(attribute='attributes.brightness') | list | average | int(0) <= min_brightness }}
+                              sequence:
+                                - action: light.turn_off
+                                  target:
+                                    entity_id: !input lights
+                                  data:
+                                    transition: "{{ light_transition / 1000 }}"
+                                - delay:
+                                    milliseconds: !input light_transition
+                          default:
+                            - action: light.turn_on
+                              target:
+                                entity_id: !input lights
+                              data:
+                                brightness: >
+                                  {{ [[expand(lights) | selectattr('state','eq','on')
+                                  | map(attribute='attributes.brightness') | list | average | int(0)
+                                  - step_long, min_brightness] | max, max_brightness] | min }}
+                                transition: 0.25
+                            - delay:
+                                milliseconds: 250
+            default:
+              - repeat:
+                  while: >
+                    {{ expand(lights) | selectattr('state','eq','on')
+                    | map(attribute='attributes.brightness') | list | average | int(0) > min_brightness }}
+                  sequence:
+                    - action: light.turn_on
+                      target:
+                        entity_id: !input lights
+                      data:
+                        brightness: >
+                          {{ [[expand(lights) | selectattr('state','eq','on')
+                          | map(attribute='attributes.brightness') | list | average | int(0)
+                          - step_long, min_brightness] | max, max_brightness] | min }}
+                        transition: 0.25
+                    - delay:
+                        milliseconds: 250
